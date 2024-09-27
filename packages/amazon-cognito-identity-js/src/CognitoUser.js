@@ -141,6 +141,7 @@ export default class CognitoUser {
 	 * @param {authSuccess} callback.onSuccess Called on success with the new session.
 	 * @returns {void}
 	 */
+	// API reference: https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_InitiateAuth.html
 	initiateAuth(authDetails, callback) {
 		const authParameters = authDetails.getAuthParameters();
 		authParameters.USERNAME = this.username;
@@ -315,7 +316,7 @@ export default class CognitoUser {
 						if (this.deviceKey != null) {
 							challengeResponses.DEVICE_KEY = this.deviceKey;
 						}
-
+						// API reference: https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_RespondToAuthChallenge.html
 						const respondToAuthChallenge = (challenge, challengeCallback) =>
 							this.client.request(
 								'RespondToAuthChallenge',
@@ -414,6 +415,8 @@ export default class CognitoUser {
 		}
 		// USER_PASSWORD_AUTH happens in a single round-trip: client sends userName and password,
 		// Cognito UserPools verifies password and returns tokens.
+
+		// REFERENCE: https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_InitiateAuth.html
 		this.client.request('InitiateAuth', jsonReq, (err, authResult) => {
 			if (err) {
 				return callback.onFailure(err);
@@ -440,7 +443,7 @@ export default class CognitoUser {
 
 		if (challengeName === 'SMS_MFA') {
 			this.Session = dataAuthenticate.Session;
-			return callback.mfaRequired(challengeName, challengeParameters);
+			return callback.smsMfaRequired(challengeName, challengeParameters);
 		}
 
 		if (challengeName === 'SELECT_MFA_TYPE') {
@@ -461,6 +464,11 @@ export default class CognitoUser {
 		if (challengeName === 'CUSTOM_CHALLENGE') {
 			this.Session = dataAuthenticate.Session;
 			return callback.customChallenge(challengeParameters);
+		}
+
+		if (challengeName === 'EMAIL_OTP') {
+			this.Session = dataAuthenticate.Session;
+			return callback.emailMfaRequired(challengeName, challengeParameters);
 		}
 
 		if (challengeName === 'NEW_PASSWORD_REQUIRED') {
@@ -834,13 +842,16 @@ export default class CognitoUser {
 	 * @param {ClientMetadata} clientMetadata object which is passed from client to Cognito Lambda trigger
 	 * @returns {void}
 	 */
+	// API reference: https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_RespondToAuthChallenge.html
 	sendMFACode(confirmationCode, callback, mfaType, clientMetadata) {
 		const challengeResponses = {};
 		challengeResponses.USERNAME = this.username;
-		challengeResponses.SMS_MFA_CODE = confirmationCode;
-		const mfaTypeSelection = mfaType || 'SMS_MFA';
-		if (mfaTypeSelection === 'SOFTWARE_TOKEN_MFA') {
+		if (mfaType === "EMAIL_OTP") {
+			challengeResponses.EMAIL_OTP_CODE = confirmationCode;
+		}else if (mfaType === "SOFTWARE_TOKEN_MFA") {
 			challengeResponses.SOFTWARE_TOKEN_MFA_CODE = confirmationCode;
+		}else {
+			challengeResponses.SMS_MFA_CODE = confirmationCode;
 		}
 
 		if (this.deviceKey != null) {
@@ -979,11 +990,13 @@ export default class CognitoUser {
 	}
 
 	/**
-	 * This is used by an authenticated user to enable MFA for itself
+	 * This is used by an authenticated user to enable SMS MFA for itself
 	 * @deprecated
 	 * @param {nodeCallback<string>} callback Called on success or error.
 	 * @returns {void}
 	 */
+	// https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_SetUserSettings.html
+	// SetUserSettings only works for SMS MFA, SetUserMFAPreference must be used for other methods
 	enableMFA(callback) {
 		if (this.signInUserSession == null || !this.signInUserSession.isValid()) {
 			return callback(new Error('User is not authenticated'), null);
@@ -1012,14 +1025,18 @@ export default class CognitoUser {
 		return undefined;
 	}
 
+
 	/**
 	 * This is used by an authenticated user to enable MFA for itself
 	 * @param {IMfaSettings} smsMfaSettings the sms mfa settings
 	 * @param {IMFASettings} softwareTokenMfaSettings the software token mfa settings
+	 * @param {IMFASettings} emailMfaSettings the email mfa settings
 	 * @param {nodeCallback<string>} callback Called on success or error.
 	 * @returns {void}
 	 */
-	setUserMfaPreference(smsMfaSettings, softwareTokenMfaSettings, callback) {
+
+	// API reference: https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_SetUserMFAPreference.html
+	setUserMfaPreference(smsMfaSettings, softwareTokenMfaSettings, emailMfaSettings, callback) {
 		if (this.signInUserSession == null || !this.signInUserSession.isValid()) {
 			return callback(new Error('User is not authenticated'), null);
 		}
@@ -1029,6 +1046,7 @@ export default class CognitoUser {
 			{
 				SMSMfaSettings: smsMfaSettings,
 				SoftwareTokenMfaSettings: softwareTokenMfaSettings,
+				EmailMfaSettings: emailMfaSettings,
 				AccessToken: this.signInUserSession.getAccessToken().getJwtToken(),
 			},
 			err => {
@@ -1047,6 +1065,7 @@ export default class CognitoUser {
 	 * @param {nodeCallback<string>} callback Called on success or error.
 	 * @returns {void}
 	 */
+	// Only for SMS
 	disableMFA(callback) {
 		if (this.signInUserSession == null || !this.signInUserSession.isValid()) {
 			return callback(new Error('User is not authenticated'), null);
@@ -1179,6 +1198,7 @@ export default class CognitoUser {
 	 * @param {nodeCallback<MFAOptions>} callback Called on success or error.
 	 * @returns {void}
 	 */
+	// API reference: https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_GetUser.html
 	getMFAOptions(callback) {
 		if (!(this.signInUserSession != null && this.signInUserSession.isValid())) {
 			return callback(new Error('User is not authenticated'), null);
@@ -2075,7 +2095,13 @@ export default class CognitoUser {
 			}
 			this.Session = data.Session;
 			if (answerChallenge === 'SMS_MFA') {
-				return callback.mfaRequired(
+				return callback.smsMfaRequired(
+					data.ChallengeName,
+					data.ChallengeParameters
+				);
+			}
+			if (answerChallenge === 'EMAIL_OTP') {
+				return callback.emailMfaRequired(
 					data.ChallengeName,
 					data.ChallengeParameters
 				);

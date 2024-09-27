@@ -11,7 +11,7 @@
  * and limitations under the License.
  */
 
-import {
+ import {
 	AuthOptions,
 	FederatedResponse,
 	SignUpParams,
@@ -574,14 +574,20 @@ export class AuthClass {
 				user['challengeParam'] = challengeParam;
 				resolve(user);
 			},
-			mfaRequired: (challengeName, challengeParam) => {
-				logger.debug('signIn MFA required');
+			smsMfaRequired: (challengeName, challengeParam) => {
+				logger.debug('signIn SMS MFA required');
 				user['challengeName'] = challengeName;
 				user['challengeParam'] = challengeParam;
 				resolve(user);
 			},
 			mfaSetup: (challengeName, challengeParam) => {
 				logger.debug('signIn mfa setup', challengeName);
+				user['challengeName'] = challengeName;
+				user['challengeParam'] = challengeParam;
+				resolve(user);
+			},
+			emailMfaRequired: (challengeName, challengeParam) => {
+				logger.debug('signIn email MFA required');
 				user['challengeName'] = challengeName;
 				user['challengeParam'] = challengeParam;
 				resolve(user);
@@ -733,6 +739,7 @@ export class AuthClass {
 		});
 	}
 
+	// API reference: https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_GetUser.html
 	private _getMfaTypeFromUserData(data) {
 		let ret = null;
 		const preferredMFA = data.PreferredMfaSetting;
@@ -743,20 +750,17 @@ export class AuthClass {
 		} else {
 			// if mfaList exists but empty, then its noMFA
 			const mfaList = data.UserMFASettingList;
-			if (!mfaList) {
-				// if SMS was enabled by using Auth.enableSMS(),
-				// the response would contain MFAOptions
-				// as for now Cognito only supports for SMS, so we will say it is 'SMS_MFA'
-				// if it does not exist, then it should be NOMFA
-				const MFAOptions = data.MFAOptions;
-				if (MFAOptions) {
-					ret = 'SMS_MFA';
-				} else {
-					ret = 'NOMFA';
-				}
-			} else if (mfaList.length === 0) {
-				ret = 'NOMFA';
-			} else {
+			// API reference for options: https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_GetUser.html#CognitoUserPools-GetUser-response-UserMFASettingList
+			if (mfaList.length === 0) {
+				ret = "NOMFA";
+			// Order of preference puts Email first, in case of multiple options and SMS not working
+			}else if (mfaList.includes("EMAIL_OTP")) {
+				ret = "EMAIL_OTP";
+			}else if (mfaList.includes("SOFTWARE_TOKEN_MFA")){
+				ret = "SOFTWARE_TOKEN_MFA";
+			}else if (mfaList.includes("SMS_MFA")) {
+				ret = "SMS_MFA";
+			}else {
 				logger.debug('invalid case for getPreferredMFA', data);
 			}
 		}
@@ -795,9 +799,11 @@ export class AuthClass {
 	 * @param {string} mfaMethod - preferred mfa method
 	 * @return - A promise resolve if success
 	 */
+	// Uses setUserMfaPreferences from CognitoUser.js
+	// API reference: https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_SetUserMFAPreference.html
 	public async setPreferredMFA(
 		user: CognitoUser | any,
-		mfaMethod: 'TOTP' | 'SMS' | 'NOMFA' | 'SMS_MFA' | 'SOFTWARE_TOKEN_MFA'
+		mfaMethod: 'TOTP' | 'SMS' | 'NOMFA' | 'SMS_MFA' | 'EMAIL_OTP' | 'SOFTWARE_TOKEN_MFA'
 	): Promise<string> {
 		const clientMetadata = this._config.clientMetadata; // TODO: verify behavior if this is override during signIn
 
@@ -807,6 +813,7 @@ export class AuthClass {
 		});
 		let smsMfaSettings = null;
 		let totpMfaSettings = null;
+		let emailMfaSettings = null;
 
 		switch (mfaMethod) {
 			case 'TOTP':
@@ -823,6 +830,12 @@ export class AuthClass {
 					Enabled: true,
 				};
 				break;
+			case 'EMAIL_OTP':
+				emailMfaSettings = {
+					PreferredMfa: true,
+					Enabled: true,
+				}
+				break;
 			case 'NOMFA':
 				const mfaList = userData['UserMFASettingList'];
 				const currentMFAType = await this._getMfaTypeFromUserData(userData);
@@ -838,13 +851,18 @@ export class AuthClass {
 						PreferredMfa: false,
 						Enabled: false,
 					};
+				} else if (currentMFAType === 'EMAIL_OTP') {
+					emailMfaSettings = {
+						PreferredMfa: false,
+						Enabled: false,
+					};
 				} else {
 					return this.rejectAuthError(AuthErrorTypes.InvalidMFA);
 				}
 				// if there is a UserMFASettingList in the response
 				// we need to disable every mfa type in that list
 				if (mfaList && mfaList.length !== 0) {
-					// to disable SMS or TOTP if exists in that list
+					// to disable SMS or TOTP or Email if exists in that list
 					mfaList.forEach(mfaType => {
 						if (mfaType === 'SMS_MFA') {
 							smsMfaSettings = {
@@ -853,6 +871,11 @@ export class AuthClass {
 							};
 						} else if (mfaType === 'SOFTWARE_TOKEN_MFA') {
 							totpMfaSettings = {
+								PreferredMfa: false,
+								Enabled: false,
+							};
+						} else if (mfaType === 'EMAIL_OTP') {
+							emailMfaSettings = {
 								PreferredMfa: false,
 								Enabled: false,
 							};
@@ -870,6 +893,7 @@ export class AuthClass {
 			user.setUserMfaPreference(
 				smsMfaSettings,
 				totpMfaSettings,
+				emailMfaSettings,
 				(err, result) => {
 					if (err) {
 						logger.debug('Set user mfa preference error', err);
@@ -940,7 +964,7 @@ export class AuthClass {
 		return new Promise((res, rej) => {
 			user.enableMFA((err, data) => {
 				if (err) {
-					logger.debug('enable mfa failed', err);
+					logger.debug('enable sms mfa failed', err);
 					rej(err);
 					return;
 				}
@@ -1010,10 +1034,11 @@ export class AuthClass {
 	 * @param {Object} user - The CognitoUser object
 	 * @param {String} code - The confirmation code
 	 */
+	// Uses sendMFACode from CognitoUser.js
 	public confirmSignIn(
 		user: CognitoUser | any,
 		code: string,
-		mfaType?: 'SMS_MFA' | 'SOFTWARE_TOKEN_MFA' | null,
+		mfaType?: 'SMS_MFA' | 'SOFTWARE_TOKEN_MFA' | 'EMAIL_OTP' | null,
 		clientMetadata: ClientMetaData = this._config.clientMetadata
 	): Promise<CognitoUser | any> {
 		if (!code) {
@@ -1098,8 +1123,20 @@ export class AuthClass {
 						);
 						reject(err);
 					},
-					mfaRequired: (challengeName, challengeParam) => {
-						logger.debug('signIn MFA required');
+					smsMfaRequired: (challengeName, challengeParam) => {
+						logger.debug('signIn SMS MFA required');
+						user['challengeName'] = challengeName;
+						user['challengeParam'] = challengeParam;
+						resolve(user);
+					},
+					emailMfaRequired: (challengeName, challengeParam) => {
+						logger.debug('signIn email MFA required');
+						user['challengeName'] = challengeName;
+						user['challengeParam'] = challengeParam;
+						resolve(user);
+					},
+					totpRequired: (challengeName, challengeParam) => {
+						logger.debug('signIn TOTP MFA required', challengeName);
 						user['challengeName'] = challengeName;
 						user['challengeParam'] = challengeParam;
 						resolve(user);
@@ -1109,13 +1146,7 @@ export class AuthClass {
 						user['challengeName'] = challengeName;
 						user['challengeParam'] = challengeParam;
 						resolve(user);
-					},
-					totpRequired: (challengeName, challengeParam) => {
-						logger.debug('signIn mfa setup', challengeName);
-						user['challengeName'] = challengeName;
-						user['challengeParam'] = challengeParam;
-						resolve(user);
-					},
+					}
 				},
 				clientMetadata
 			);
